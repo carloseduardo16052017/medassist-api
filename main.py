@@ -18,7 +18,7 @@ from scripts.build_acs import gerar_acs, sem_acento, ler_ingressantes_excel
 app = FastAPI(
     title="MedAssist AUTO API",
     description="API para geração automática de minutas ACS e planilhas DBE",
-    version="1.6.0"
+    version="1.7.0"
 )
 
 app.add_middleware(
@@ -354,115 +354,143 @@ def extrair_representante_da_minuta(docx_bytes: bytes) -> str:
     return "o Representante"
 
 
+def extrair_nome_empresa_da_minuta(docx_bytes: bytes) -> str:
+    """
+    Extrai o nome da empresa da minuta registrada.
+    O nome da empresa fica na 3ª linha do cabeçalho (parágrafo 2).
+    """
+    doc = Document(io.BytesIO(docx_bytes))
+    # O nome da empresa está tipicamente no parágrafo 2 (índice 2)
+    for p in doc.paragraphs[:6]:
+        txt = p.text.strip()
+        # Nome da empresa tem LTDA ou S/A e é todo maiúsculo
+        if txt and ('LTDA' in txt or 'S/A' in txt or 'EIRELI' in txt):
+            return txt
+    return ""
+
+
 def gerar_declaracao_autenticidade_docx(
     nomes_ingressantes: list[str],
     nome_representante: str,
+    nome_empresa: str,
 ) -> bytes:
     """
     Gera o documento Word da Declaração de Autenticidade.
+
+    Formatação:
+    - RAPHAEL ALVES ANTUNES e DECLARO em negrito no corpo
+    - "Documentos apresentados:" sem negrito
+    - Itens com marcador traço (-)
+    - Item 2 inclui nome da empresa
+    - Cabeçalho da tabela sem negrito; nomes dos ingressantes em negrito
+    - Data com dois espaços: ___ de ___ de 2026.
     """
-    from docx.shared import Pt, Inches, RGBColor
+    from docx.shared import Pt, Inches
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
 
     doc = Document()
 
-    # Margens
     sec = doc.sections[0]
     sec.top_margin    = Inches(1.0)
     sec.bottom_margin = Inches(1.0)
     sec.left_margin   = Inches(1.18)
     sec.right_margin  = Inches(1.18)
 
-    def add_p(text='', bold=False, center=False, sz=11, space_after=8):
+    FONT = 'Arial'
+    SZ   = 11
+
+    def run(para, text, bold=False):
+        r = para.add_run(text)
+        r.font.name = FONT
+        r.font.size = Pt(SZ)
+        r.font.bold = bold
+        return r
+
+    def new_p(center=False, space_after=8):
         p = doc.add_paragraph()
         p.alignment = WD_ALIGN_PARAGRAPH.CENTER if center else WD_ALIGN_PARAGRAPH.JUSTIFY
         p.paragraph_format.space_before = Pt(0)
         p.paragraph_format.space_after  = Pt(space_after)
-        if text:
-            r = p.add_run(text)
-            r.font.name = 'Arial'
-            r.font.size = Pt(sz)
-            r.font.bold = bold
         return p
 
-    # Título
-    add_p('DECLARAÇÃO DE AUTENTICIDADE', bold=True, center=True, sz=12, space_after=16)
+    # ── Título ────────────────────────────────────────────────────────
+    p = new_p(center=True, space_after=16)
+    r = p.add_run('DECLARAÇÃO DE AUTENTICIDADE')
+    r.font.name = FONT; r.font.size = Pt(12); r.font.bold = True
 
-    # Corpo principal
-    corpo = (
-        f'Eu RAPHAEL ALVES ANTUNES, com inscrição ativa na OAB/SP sob o nº 286.717, '
-        f'expedida em 24.10.2019, inscrito no CPF nº 340.541.598-50, DECLARO, sob as '
-        f'penas da Lei penal e, sem prejuízo das sanções administrativas e cíveis, que '
-        f'estes documentos são autênticos e condizem com os originais respectivos.'
-    )
-    add_p(corpo, sz=11, space_after=12)
+    # ── Corpo com RAPHAEL e DECLARO em negrito ────────────────────────
+    p = new_p(space_after=12)
+    run(p, 'Eu ')
+    run(p, 'RAPHAEL ALVES ANTUNES', bold=True)
+    run(p,
+        ', com inscrição ativa na OAB/SP sob o nº 286.717, expedida em 24.10.2019, '
+        'inscrito no CPF nº 340.541.598-50, ')
+    run(p, 'DECLARO', bold=True)
+    run(p,
+        ', sob as penas da Lei penal e, sem prejuízo das sanções administrativas e cíveis, '
+        'que estes documentos são autênticos e condizem com os originais respectivos.')
 
-    add_p('Documentos apresentados:', bold=True, sz=11, space_after=6)
+    # ── "Documentos apresentados:" sem negrito ────────────────────────
+    p = new_p(space_after=6)
+    run(p, 'Documentos apresentados:', bold=False)
 
-    # Lista numerada de documentos fixos
-    itens_fixos = [
+    # ── Itens com traço (-) ───────────────────────────────────────────
+    empresa_str = f' {nome_empresa}' if nome_empresa else ''
+    itens = [
         'Carteira OAB/SP de Raphael Alves Antunes (Qtde. Folhas: 1);',
-        'Procuração outorgada para Raphael Alves Antunes (Qtde. Folhas: 2)',
+        f'Procuração outorgada{empresa_str} para Raphael Alves Antunes (Qtde. Folhas: 2)',
         f'Procurações e documentos dos sócios ingressantes, outorgada para {nome_representante}',
     ]
-    for i, item in enumerate(itens_fixos, 1):
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.JUSTIFY
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after  = Pt(4)
-        p.paragraph_format.left_indent  = Inches(0.4)
-        r = p.add_run(f'{i}. {item}')
-        r.font.name = 'Arial'
-        r.font.size = Pt(11)
+    for item in itens:
+        p = new_p(space_after=4)
+        p.paragraph_format.left_indent = Inches(0.3)
+        run(p, f'- {item}')
 
-    # Espaço antes da tabela
-    add_p('', space_after=8)
+    # ── Espaço antes da tabela ────────────────────────────────────────
+    new_p(space_after=8)
 
-    # Tabela de ingressantes
+    # ── Tabela ───────────────────────────────────────────────────────
+    # Cabeçalho SEM negrito; nomes dos ingressantes EM negrito
     table = doc.add_table(rows=1, cols=2)
     table.style = 'Table Grid'
-
-    # Cabeçalho
-    hdr = table.rows[0].cells
-    for i, h in enumerate(['NOME', 'PROCURAÇÃO E DOCUMENTOS PESSOAIS']):
-        hdr[i].text = h
-        for para in hdr[i].paragraphs:
-            para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-            if para.runs:
-                para.runs[0].font.bold = True
-                para.runs[0].font.name = 'Arial'
-                para.runs[0].font.size = Pt(10)
-
-    # Linhas de ingressantes
-    for nome in nomes_ingressantes:
-        row = table.add_row().cells
-        row[0].text = nome.upper()
-        row[1].text = 'PROCURAÇÃO E DOCUMENTOS PESSOAIS'
-        for cell in row:
-            for para in cell.paragraphs:
-                para.alignment = WD_ALIGN_PARAGRAPH.CENTER
-                if para.runs:
-                    para.runs[0].font.name = 'Arial'
-                    para.runs[0].font.size = Pt(10)
-
-    # Larguras das colunas
-    from docx.oxml import OxmlElement
     col_widths = [int(3.5 * 1440), int(3.0 * 1440)]
-    for row in table.rows:
-        for i, cell in enumerate(row.cells):
-            tc = cell._tc
-            tcPr = tc.get_or_add_tcPr()
+
+    def set_cell(cell, text, bold=False, w=None):
+        cell.text = ''
+        p = cell.paragraphs[0]
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+        p.paragraph_format.space_before = Pt(0)
+        p.paragraph_format.space_after  = Pt(2)
+        r = p.add_run(text)
+        r.font.name = FONT
+        r.font.size = Pt(10)
+        r.font.bold = bold
+        if w is not None:
+            tc = cell._tc; tcPr = tc.get_or_add_tcPr()
             tcW = OxmlElement('w:tcW')
-            tcW.set(qn('w:w'), str(col_widths[i]))
-            tcW.set(qn('w:type'), 'dxa')
+            tcW.set(qn('w:w'), str(w)); tcW.set(qn('w:type'), 'dxa')
             tcPr.append(tcW)
 
-    # Data e assinatura
-    add_p('', space_after=16)
-    add_p('São Paulo, SP, ___ de 2026.', center=True, sz=11, space_after=24)
-    add_p('RAPHAEL ALVES ANTUNES', bold=True, center=True, sz=11, space_after=0)
+    # Cabeçalho — sem negrito
+    hdr = table.rows[0].cells
+    set_cell(hdr[0], 'NOME', bold=False, w=col_widths[0])
+    set_cell(hdr[1], 'PROCURAÇÃO E DOCUMENTOS PESSOAIS', bold=False, w=col_widths[1])
+
+    # Ingressantes — nome em negrito
+    for nome in nomes_ingressantes:
+        row = table.add_row().cells
+        set_cell(row[0], nome.upper(), bold=True, w=col_widths[0])
+        set_cell(row[1], 'PROCURAÇÃO E DOCUMENTOS PESSOAIS', bold=False, w=col_widths[1])
+
+    # ── Data e assinatura ─────────────────────────────────────────────
+    new_p(space_after=16)
+    p = new_p(center=True, space_after=24)
+    run(p, 'São Paulo, SP, ___ de ___ de 2026.')
+
+    p = new_p(center=True, space_after=0)
+    run(p, 'RAPHAEL ALVES ANTUNES', bold=True)
 
     output = io.BytesIO()
     doc.save(output)
@@ -489,11 +517,12 @@ async def gerar_declaracao_autenticidade(
             raise HTTPException(status_code=400, detail="Nenhum ingressante encontrado no relatório ClickSign.")
         nomes_ing = [d['nome'].upper() for d in dados_ing]
 
-        # Extrair representante da minuta
-        nome_rep = extrair_representante_da_minuta(docx_bytes)
+        # Extrair representante e nome da empresa da minuta
+        nome_rep     = extrair_representante_da_minuta(docx_bytes)
+        nome_empresa = extrair_nome_empresa_da_minuta(docx_bytes)
 
         # Gerar .docx
-        docx_out = gerar_declaracao_autenticidade_docx(nomes_ing, nome_rep)
+        docx_out = gerar_declaracao_autenticidade_docx(nomes_ing, nome_rep, nome_empresa)
 
     except HTTPException:
         raise
