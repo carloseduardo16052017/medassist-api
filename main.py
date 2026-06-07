@@ -5,6 +5,7 @@ Endpoints:
   POST /gerar-dbe-ingressantes          → Gera planilha DBE dos ingressantes (.xlsx)
   POST /gerar-dbe-retirantes            → Gera planilha DBE dos retirantes (.xlsx)
   POST /gerar-declaracao-autenticidade  → Gera Declaração de Autenticidade (.docx)
+  POST /converter-para-pdf              → Converte .docx para .pdf via LibreOffice
 """
 from fastapi import FastAPI, UploadFile, File, Form, HTTPException
 from fastapi.responses import Response
@@ -18,7 +19,7 @@ from scripts.build_acs import gerar_acs, sem_acento, ler_ingressantes_excel
 app = FastAPI(
     title="MedAssist AUTO API",
     description="API para geração automática de minutas ACS e planilhas DBE",
-    version="1.9.0"
+    version="2.0.0"
 )
 
 app.add_middleware(
@@ -561,4 +562,68 @@ async def gerar_declaracao_autenticidade(
         content=docx_out,
         media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
         headers={"Content-Disposition": 'attachment; filename="Declaracao_Autenticidade.docx"'}
+    )
+
+
+@app.post("/converter-para-pdf")
+async def converter_para_pdf(
+    arquivo: UploadFile = File(..., description="Arquivo .docx para converter em .pdf"),
+):
+    """
+    Converte um arquivo .docx para .pdf usando LibreOffice headless.
+    Retorna o .pdf para download.
+    """
+    import subprocess
+    import tempfile
+    import os
+
+    docx_bytes = await arquivo.read()
+    nome_base  = os.path.splitext(arquivo.filename or "documento")[0]
+
+    # Usar diretório temporário para entrada e saída
+    with tempfile.TemporaryDirectory() as tmpdir:
+        input_path  = os.path.join(tmpdir, f"{nome_base}.docx")
+        output_path = os.path.join(tmpdir, f"{nome_base}.pdf")
+
+        # Salvar .docx recebido
+        with open(input_path, "wb") as f:
+            f.write(docx_bytes)
+
+        # Converter com LibreOffice headless
+        try:
+            result = subprocess.run(
+                [
+                    "soffice", "--headless",
+                    "--convert-to", "pdf",
+                    "--outdir", tmpdir,
+                    input_path,
+                ],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except FileNotFoundError:
+            raise HTTPException(
+                status_code=503,
+                detail="LibreOffice não encontrado no servidor. Verifique a instalação."
+            )
+        except subprocess.TimeoutExpired:
+            raise HTTPException(status_code=504, detail="Timeout na conversão para PDF.")
+
+        if result.returncode != 0:
+            raise HTTPException(
+                status_code=500,
+                detail=f"Erro na conversão: {result.stderr or result.stdout}"
+            )
+
+        if not os.path.exists(output_path):
+            raise HTTPException(status_code=500, detail="PDF não foi gerado pelo LibreOffice.")
+
+        with open(output_path, "rb") as f:
+            pdf_bytes = f.read()
+
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{nome_base}.pdf"'}
     )
