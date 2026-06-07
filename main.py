@@ -17,7 +17,7 @@ from scripts.build_acs import gerar_acs, sem_acento, ler_ingressantes_excel
 app = FastAPI(
     title="MedAssist AUTO API",
     description="API para geração automática de minutas ACS e planilhas DBE",
-    version="1.4.0"
+    version="1.5.0"
 )
 
 app.add_middleware(
@@ -177,7 +177,7 @@ def extrair_dados_retirantes_docx(docx_bytes: bytes) -> list[dict]:
             continue
 
         # Extrair campos
-        cpf_match = re.search(r'CPF sob n[°º]\s*([\d]{3}\.[\d]{3}\.[\d]{3}-[\d]{2})', txt)
+        cpf_match = re.search(r'CPF\D{0,10}([\d]{3}\.[\d]{3}\.[\d]{3}-[\d]{2})', txt)
         cpf = cpf_match.group(1) if cpf_match else ''
 
         cep_match = re.search(r'CEP\s*([\d]{5}-?[\d]{3})', txt)
@@ -289,18 +289,34 @@ async def gerar_dbe_retirantes(
 ):
     """
     Gera planilha DBE dos sócios RETIRANTES.
-    Extrai automaticamente os nomes e dados dos retirantes da minuta (.docx).
-    Não é necessário informar os nomes separadamente.
+    Formato: 2 colunas — CPF (sem pontuação) | Nome (maiúsculas).
+    Aba: 'Sócios Ingressantes'.
+    Extrai automaticamente da minuta sem precisar informar os nomes.
     """
+    import re
     try:
         docx_bytes = await minuta.read()
         dados = extrair_dados_retirantes_docx(docx_bytes)
         if not dados:
             raise HTTPException(
                 status_code=404,
-                detail="Nenhum retirante encontrado na seção '1.2. Os sócios:' da minuta."
+                detail="Nenhum retirante encontrado na seção 'Os sócios:' da minuta."
             )
-        xlsx_bytes = gerar_planilha_dbe(dados)
+
+        # Montar planilha: apenas CPF limpo + Nome maiúsculas
+        rows = []
+        for d in dados:
+            cpf_limpo = re.sub(r'[.\-]', '', str(d.get('cpf', '')))
+            nome = d.get('nome', '').upper().strip()
+            rows.append([cpf_limpo, nome])
+
+        df = pd.DataFrame(rows, columns=['CPF', 'Nome'])
+        output = io.BytesIO()
+        with pd.ExcelWriter(output, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, header=False, sheet_name='Sócios Ingressantes')
+        output.seek(0)
+        xlsx_bytes = output.read()
+
     except HTTPException:
         raise
     except Exception as e:
