@@ -18,7 +18,7 @@ from scripts.build_acs import gerar_acs, sem_acento, ler_ingressantes_excel
 app = FastAPI(
     title="MedAssist AUTO API",
     description="API para geração automática de minutas ACS e planilhas DBE",
-    version="1.7.0"
+    version="1.8.0"
 )
 
 app.add_middleware(
@@ -369,128 +369,122 @@ def extrair_nome_empresa_da_minuta(docx_bytes: bytes) -> str:
     return ""
 
 
+def _replace_text_in_para(para, old: str, new: str):
+    """
+    Substitui texto em um parágrafo preservando a formatação do primeiro run.
+    Concatena todos os runs, faz a substituição e coloca tudo no primeiro run.
+    """
+    full = ''.join(r.text for r in para.runs)
+    if old not in full:
+        return False
+    new_full = full.replace(old, new, 1)
+    if para.runs:
+        para.runs[0].text = new_full
+        for r in para.runs[1:]:
+            r.text = ''
+    return True
+
+
 def gerar_declaracao_autenticidade_docx(
     nomes_ingressantes: list[str],
     nome_representante: str,
     nome_empresa: str,
 ) -> bytes:
     """
-    Gera o documento Word da Declaração de Autenticidade.
-
-    Formatação:
-    - RAPHAEL ALVES ANTUNES e DECLARO em negrito no corpo
-    - "Documentos apresentados:" sem negrito
-    - Itens com marcador traço (-)
-    - Item 2 inclui nome da empresa
-    - Cabeçalho da tabela sem negrito; nomes dos ingressantes em negrito
-    - Data com dois espaços: ___ de ___ de 2026.
+    Abre o template declaracao_autenticidade_template.docx e substitui:
+    - Nome da empresa no item 2 da lista
+    - Nome do representante no item 3
+    - Linhas da tabela (mantém cabeçalho, substitui ingressantes com nome em negrito)
+    - Data pela data de hoje em português
     """
-    from docx.shared import Pt, Inches
+    import os
+    import copy
+    from datetime import date
+    from docx.shared import Pt
     from docx.enum.text import WD_ALIGN_PARAGRAPH
     from docx.oxml.ns import qn
     from docx.oxml import OxmlElement
 
-    doc = Document()
+    MONTHS_PT = {
+        1:'janeiro', 2:'fevereiro', 3:'março', 4:'abril',
+        5:'maio', 6:'junho', 7:'julho', 8:'agosto',
+        9:'setembro', 10:'outubro', 11:'novembro', 12:'dezembro'
+    }
+    today = date.today()
+    data_pt = f"{today.day:02d} de {MONTHS_PT[today.month]} de {today.year}"
 
-    sec = doc.sections[0]
-    sec.top_margin    = Inches(1.0)
-    sec.bottom_margin = Inches(1.0)
-    sec.left_margin   = Inches(1.18)
-    sec.right_margin  = Inches(1.18)
+    # Localizar o template relativo ao main.py
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    tpl_path = os.path.join(base_dir, 'templates', 'declaracao_autenticidade_template.docx')
+    doc = Document(tpl_path)
 
-    FONT = 'Arial'
-    SZ   = 11
+    # ── 1. Substituir nome da empresa no item 2 ──────────────────────
+    for p in doc.paragraphs:
+        txt = ''.join(r.text for r in p.runs)
+        if 'QUALIFEMME SERVIÇOS MÉDICOS LTDA' in txt and 'Procuração outorgada' in txt:
+            _replace_text_in_para(p, 'QUALIFEMME SERVIÇOS MÉDICOS LTDA', nome_empresa or 'QUALIFEMME SERVIÇOS MÉDICOS LTDA')
+            break
 
-    def run(para, text, bold=False):
-        r = para.add_run(text)
-        r.font.name = FONT
-        r.font.size = Pt(SZ)
-        r.font.bold = bold
-        return r
+    # ── 2. Substituir nome do representante no item 3 ────────────────
+    for p in doc.paragraphs:
+        txt = ''.join(r.text for r in p.runs)
+        if 'Marcelo Costa Moreira' in txt and 'outorgada para' in txt:
+            _replace_text_in_para(p, 'Marcelo Costa Moreira', nome_representante)
+            break
 
-    def new_p(center=False, space_after=8):
-        p = doc.add_paragraph()
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER if center else WD_ALIGN_PARAGRAPH.JUSTIFY
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after  = Pt(space_after)
-        return p
+    # ── 3. Substituir data ───────────────────────────────────────────
+    for p in doc.paragraphs:
+        txt = ''.join(r.text for r in p.runs)
+        if 'São Paulo, SP,' in txt and 'de 20' in txt:
+            import re
+            old_date = re.search(r'\d{1,2} de \w+ de \d{4}', txt)
+            if old_date:
+                _replace_text_in_para(p, old_date.group(0), data_pt)
+            break
 
-    # ── Título ────────────────────────────────────────────────────────
-    p = new_p(center=True, space_after=16)
-    r = p.add_run('DECLARAÇÃO DE AUTENTICIDADE')
-    r.font.name = FONT; r.font.size = Pt(12); r.font.bold = True
+    # ── 4. Substituir linhas da tabela ───────────────────────────────
+    for tbl in doc.tables:
+        if len(tbl.rows) < 1:
+            continue
+        # Verificar se é a tabela de ingressantes (cabeçalho com NOME)
+        hdr_txt = tbl.rows[0].cells[0].text.strip()
+        if hdr_txt.upper() != 'NOME':
+            continue
 
-    # ── Corpo com RAPHAEL e DECLARO em negrito ────────────────────────
-    p = new_p(space_after=12)
-    run(p, 'Eu ')
-    run(p, 'RAPHAEL ALVES ANTUNES', bold=True)
-    run(p,
-        ', com inscrição ativa na OAB/SP sob o nº 286.717, expedida em 24.10.2019, '
-        'inscrito no CPF nº 340.541.598-50, ')
-    run(p, 'DECLARO', bold=True)
-    run(p,
-        ', sob as penas da Lei penal e, sem prejuízo das sanções administrativas e cíveis, '
-        'que estes documentos são autênticos e condizem com os originais respectivos.')
+        # Remover todas as linhas exceto o cabeçalho
+        for row in list(tbl.rows[1:]):
+            tbl._tbl.remove(row._tr)
 
-    # ── "Documentos apresentados:" sem negrito ────────────────────────
-    p = new_p(space_after=6)
-    run(p, 'Documentos apresentados:', bold=False)
+        # Adicionar linhas dos ingressantes com nome em negrito
+        template_row = tbl.rows[0]  # usar cabeçalho como referência de formato
+        for nome in nomes_ingressantes:
+            # Criar nova linha copiando estrutura do cabeçalho
+            new_tr = copy.deepcopy(template_row._tr)
+            cells = new_tr.findall(f'{{{qn("w:tc").split("}")[0][1:]}}}tc') if False else \
+                    new_tr.findall('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tc')
 
-    # ── Itens com traço (-) ───────────────────────────────────────────
-    empresa_str = f' {nome_empresa}' if nome_empresa else ''
-    itens = [
-        'Carteira OAB/SP de Raphael Alves Antunes (Qtde. Folhas: 1);',
-        f'Procuração outorgada{empresa_str} para Raphael Alves Antunes (Qtde. Folhas: 2)',
-        f'Procurações e documentos dos sócios ingressantes, outorgada para {nome_representante}',
-    ]
-    for item in itens:
-        p = new_p(space_after=4)
-        p.paragraph_format.left_indent = Inches(0.3)
-        run(p, f'- {item}')
+            # Limpar e definir conteúdo das células
+            def set_tc_text(tc_elem, text, bold=False):
+                NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
+                for p_elem in tc_elem.findall(f'{{{NS}}}p'):
+                    for r_elem in list(p_elem.findall(f'{{{NS}}}r')):
+                        p_elem.remove(r_elem)
+                    # Criar run com o texto
+                    r_new = OxmlElement('w:r')
+                    rPr = OxmlElement('w:rPr')
+                    if bold:
+                        b = OxmlElement('w:b'); rPr.append(b)
+                    r_new.append(rPr)
+                    t = OxmlElement('w:t'); t.text = text
+                    t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+                    r_new.append(t); p_elem.append(r_new)
 
-    # ── Espaço antes da tabela ────────────────────────────────────────
-    new_p(space_after=8)
+            if len(cells) >= 2:
+                set_tc_text(cells[0], nome.upper(), bold=True)
+                set_tc_text(cells[1], 'PROCURAÇÃO E DOCUMENTOS PESSOAIS', bold=False)
 
-    # ── Tabela ───────────────────────────────────────────────────────
-    # Cabeçalho SEM negrito; nomes dos ingressantes EM negrito
-    table = doc.add_table(rows=1, cols=2)
-    table.style = 'Table Grid'
-    col_widths = [int(3.5 * 1440), int(3.0 * 1440)]
-
-    def set_cell(cell, text, bold=False, w=None):
-        cell.text = ''
-        p = cell.paragraphs[0]
-        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
-        p.paragraph_format.space_before = Pt(0)
-        p.paragraph_format.space_after  = Pt(2)
-        r = p.add_run(text)
-        r.font.name = FONT
-        r.font.size = Pt(10)
-        r.font.bold = bold
-        if w is not None:
-            tc = cell._tc; tcPr = tc.get_or_add_tcPr()
-            tcW = OxmlElement('w:tcW')
-            tcW.set(qn('w:w'), str(w)); tcW.set(qn('w:type'), 'dxa')
-            tcPr.append(tcW)
-
-    # Cabeçalho — sem negrito
-    hdr = table.rows[0].cells
-    set_cell(hdr[0], 'NOME', bold=False, w=col_widths[0])
-    set_cell(hdr[1], 'PROCURAÇÃO E DOCUMENTOS PESSOAIS', bold=False, w=col_widths[1])
-
-    # Ingressantes — nome em negrito
-    for nome in nomes_ingressantes:
-        row = table.add_row().cells
-        set_cell(row[0], nome.upper(), bold=True, w=col_widths[0])
-        set_cell(row[1], 'PROCURAÇÃO E DOCUMENTOS PESSOAIS', bold=False, w=col_widths[1])
-
-    # ── Data e assinatura ─────────────────────────────────────────────
-    new_p(space_after=16)
-    p = new_p(center=True, space_after=24)
-    run(p, 'São Paulo, SP, ___ de ___ de 2026.')
-
-    p = new_p(center=True, space_after=0)
-    run(p, 'RAPHAEL ALVES ANTUNES', bold=True)
+            tbl._tbl.append(new_tr)
+        break  # processar apenas a primeira tabela relevante
 
     output = io.BytesIO()
     doc.save(output)
