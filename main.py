@@ -19,7 +19,7 @@ from scripts.build_acs import gerar_acs, sem_acento, ler_ingressantes_excel
 app = FastAPI(
     title="MedAssist AUTO API",
     description="API para geração automática de minutas ACS e planilhas DBE",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 app.add_middleware(
@@ -565,62 +565,193 @@ async def gerar_declaracao_autenticidade(
     )
 
 
+def _extrair_dados_declaracao(docx_bytes: bytes) -> dict:
+    """
+    Extrai do .docx da Declaração de Autenticidade:
+    - nome_empresa (do item 2)
+    - nome_representante (do item 3)
+    - data (parágrafo com 'São Paulo, SP,')
+    - ingressantes (nomes da tabela, excluindo cabeçalho)
+    """
+    doc = Document(io.BytesIO(docx_bytes))
+    dados = {
+        "nome_empresa": "",
+        "nome_representante": "",
+        "data": "",
+        "ingressantes": [],
+    }
+
+    for p in doc.paragraphs:
+        txt = p.text.strip()
+        if 'Procuração outorgada' in txt and 'para Raphael' in txt:
+            # "Procuração outorgada EMPRESA para Raphael..."
+            import re as _re
+            m = _re.search(r'outorgada\s+(.+?)\s+para Raphael', txt)
+            if m:
+                dados["nome_empresa"] = m.group(1).strip()
+        elif 'outorgada para' in txt and 'sócios ingressantes' in txt:
+            # "...outorgada para REPRESENTANTE"
+            import re as _re
+            m = _re.search(r'outorgada para\s+(.+)$', txt)
+            if m:
+                dados["nome_representante"] = m.group(1).strip()
+        elif 'São Paulo, SP,' in txt:
+            dados["data"] = txt
+
+    for tbl in doc.tables:
+        if tbl.rows and tbl.rows[0].cells[0].text.strip().upper() == 'NOME':
+            for row in tbl.rows[1:]:
+                nome = row.cells[0].text.strip()
+                if nome:
+                    dados["ingressantes"].append(nome)
+
+    return dados
+
+
 @app.post("/converter-para-pdf")
 async def converter_para_pdf(
-    arquivo: UploadFile = File(..., description="Arquivo .docx para converter em .pdf"),
+    arquivo: UploadFile = File(..., description="Arquivo .docx da Declaração de Autenticidade"),
 ):
     """
-    Converte um arquivo .docx para .pdf usando LibreOffice headless.
-    Retorna o .pdf para download.
+    Gera PDF da Declaração de Autenticidade usando ReportLab.
+    Extrai dados do .docx recebido e monta o PDF com a formatação correta.
     """
-    import subprocess
-    import tempfile
-    import os
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib.units import cm
+    from reportlab.lib.styles import ParagraphStyle
+    from reportlab.lib.enums import TA_CENTER, TA_JUSTIFY, TA_LEFT
+    from reportlab.platypus import (
+        SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle,
+    )
+    from reportlab.lib import colors
+    from reportlab.lib.colors import black
 
     docx_bytes = await arquivo.read()
-    nome_base  = os.path.splitext(arquivo.filename or "documento")[0]
+    nome_base  = arquivo.filename.replace(".docx", "") if arquivo.filename else "Declaracao"
 
-    # Usar diretório temporário para entrada e saída
-    with tempfile.TemporaryDirectory() as tmpdir:
-        input_path  = os.path.join(tmpdir, f"{nome_base}.docx")
-        output_path = os.path.join(tmpdir, f"{nome_base}.pdf")
+    # ── Extrair dados do .docx ──────────────────────────────────────
+    dados = _extrair_dados_declaracao(docx_bytes)
+    empresa     = dados["nome_empresa"]    or "QUALIFEMME SERVIÇOS MÉDICOS LTDA"
+    representante = dados["nome_representante"] or "Marcelo Costa Moreira"
+    data_txt    = dados["data"]            or "São Paulo, SP, ___ de ___ de 2026."
+    ingressantes = dados["ingressantes"]
 
-        # Salvar .docx recebido
-        with open(input_path, "wb") as f:
-            f.write(docx_bytes)
+    # ── Estilos base ────────────────────────────────────────────────
+    FONT      = "Helvetica"
+    FONT_BOLD = "Helvetica-Bold"
+    SZ        = 9
 
-        # Converter com LibreOffice headless
-        try:
-            result = subprocess.run(
-                [
-                    "soffice", "--headless",
-                    "--convert-to", "pdf",
-                    "--outdir", tmpdir,
-                    input_path,
-                ],
-                capture_output=True,
-                text=True,
-                timeout=60,
-            )
-        except FileNotFoundError:
-            raise HTTPException(
-                status_code=503,
-                detail="LibreOffice não encontrado no servidor. Verifique a instalação."
-            )
-        except subprocess.TimeoutExpired:
-            raise HTTPException(status_code=504, detail="Timeout na conversão para PDF.")
+    def st(name, **kw):
+        base = dict(fontName=FONT, fontSize=SZ, leading=12, spaceAfter=4)
+        base.update(kw)
+        return ParagraphStyle(name, **base)
 
-        if result.returncode != 0:
-            raise HTTPException(
-                status_code=500,
-                detail=f"Erro na conversão: {result.stderr or result.stdout}"
-            )
+    s_justify  = st("justify",  alignment=TA_JUSTIFY)
+    s_center   = st("center",   alignment=TA_CENTER)
+    s_left     = st("left",     alignment=TA_LEFT)
 
-        if not os.path.exists(output_path):
-            raise HTTPException(status_code=500, detail="PDF não foi gerado pelo LibreOffice.")
+    # ── Construir conteúdo ──────────────────────────────────────────
+    story = []
+    W, H  = A4
 
-        with open(output_path, "rb") as f:
-            pdf_bytes = f.read()
+    # Título em caixa com borda
+    titulo_style = ParagraphStyle(
+        "titulo", fontName=FONT_BOLD, fontSize=SZ, alignment=TA_CENTER, leading=14
+    )
+    titulo_tbl = Table(
+        [[Paragraph("DECLARAÇÃO DE AUTENTICIDADE", titulo_style)]],
+        colWidths=[W - 4*cm],
+    )
+    titulo_tbl.setStyle(TableStyle([
+        ("BOX",         (0,0), (-1,-1), 1, black),
+        ("TOPPADDING",  (0,0), (-1,-1), 6),
+        ("BOTTOMPADDING",(0,0),(-1,-1), 6),
+        ("LEFTPADDING", (0,0), (-1,-1), 8),
+        ("RIGHTPADDING",(0,0), (-1,-1), 8),
+    ]))
+    story.append(titulo_tbl)
+    story.append(Spacer(1, 0.4*cm))
+
+    # Corpo — RAPHAEL e DECLARO em negrito
+    corpo = (
+        f'Eu <b>RAPHAEL ALVES ANTUNES</b>, com inscrição ativa na OAB/SP sob o nº 286.717, '
+        f'expedida em 24.10.2019, inscrito no CPF nº 340.541.598-50, <b>DECLARO</b>, '
+        f'sob as penas da Lei penal e, sem prejuízo das sanções administrativas e cíveis, '
+        f'que estes documentos são autênticos e condizem com os originais respectivos.'
+    )
+    story.append(Paragraph(corpo, s_justify))
+    story.append(Spacer(1, 0.3*cm))
+
+    # "Documentos apresentados:" sublinhado
+    story.append(Paragraph('<u>Documentos apresentados:</u>', s_left))
+    story.append(Spacer(1, 0.2*cm))
+
+    # Item 1 — "Carteira OAB/SP" sublinhado
+    story.append(Paragraph(
+        '- <u>Carteira OAB/SP</u> de Raphael Alves Antunes (Qtde. Folhas: 1);',
+        s_left
+    ))
+    # Item 2 — empresa em negrito
+    story.append(Paragraph(
+        f'- Procuração outorgada <b>{empresa}</b> para Raphael Alves Antunes (Qtde. Folhas: 2)',
+        s_left
+    ))
+    # Item 3 — representante em negrito
+    story.append(Paragraph(
+        f'- Procurações e documentos dos sócios ingressantes, outorgada para <b>{representante}</b>',
+        s_left
+    ))
+    story.append(Spacer(1, 0.4*cm))
+
+    # Tabela de ingressantes
+    hdr_style = ParagraphStyle("hdr", fontName=FONT, fontSize=SZ, alignment=TA_CENTER, leading=12)
+    row_name  = ParagraphStyle("rn",  fontName=FONT_BOLD, fontSize=SZ, alignment=TA_CENTER, leading=12)
+    row_proc  = ParagraphStyle("rp",  fontName=FONT, fontSize=SZ, alignment=TA_CENTER, leading=12)
+
+    tbl_data = [[
+        Paragraph("NOME", hdr_style),
+        Paragraph("PROCURAÇÃO E DOCUMENTOS PESSOAIS", hdr_style),
+    ]]
+    for nome in ingressantes:
+        tbl_data.append([
+            Paragraph(nome, row_name),
+            Paragraph("PROCURAÇÃO E DOCUMENTOS PESSOAIS", row_proc),
+        ])
+
+    col1_w = (W - 4*cm) * 0.55
+    col2_w = (W - 4*cm) * 0.45
+    tabela = Table(tbl_data, colWidths=[col1_w, col2_w], repeatRows=1)
+    tabela.setStyle(TableStyle([
+        ("GRID",         (0,0), (-1,-1), 0.5, colors.grey),
+        ("BACKGROUND",   (0,0), (-1,0),  colors.whitesmoke),
+        ("TOPPADDING",   (0,0), (-1,-1), 4),
+        ("BOTTOMPADDING",(0,0), (-1,-1), 4),
+        ("LEFTPADDING",  (0,0), (-1,-1), 4),
+        ("RIGHTPADDING", (0,0), (-1,-1), 4),
+    ]))
+    story.append(tabela)
+    story.append(Spacer(1, 0.5*cm))
+
+    # Data
+    story.append(Paragraph(data_txt, s_center))
+    story.append(Spacer(1, 0.8*cm))
+
+    # Assinatura em negrito
+    story.append(Paragraph(
+        '<b>RAPHAEL ALVES ANTUNES</b>',
+        ParagraphStyle("sig", fontName=FONT_BOLD, fontSize=SZ, alignment=TA_CENTER, leading=12)
+    ))
+
+    # ── Gerar PDF ───────────────────────────────────────────────────
+    buf = io.BytesIO()
+    doc_pdf = SimpleDocTemplate(
+        buf, pagesize=A4,
+        leftMargin=2.5*cm, rightMargin=2.5*cm,
+        topMargin=2.5*cm,  bottomMargin=2.5*cm,
+    )
+    doc_pdf.build(story)
+    buf.seek(0)
+    pdf_bytes = buf.read()
 
     return Response(
         content=pdf_bytes,
