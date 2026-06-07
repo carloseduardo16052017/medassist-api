@@ -62,75 +62,57 @@ def gerar_planilha_dbe(dados: list[dict]) -> bytes:
 
 def extrair_nomes_retirantes_do_docx(docx_bytes: bytes) -> list[str]:
     """
-    Extrai AUTOMATICAMENTE os nomes dos retirantes da minuta.
+    Extrai AUTOMATICAMENTE os nomes dos retirantes da seção 1.2.
 
-    Padrão Word: os retirantes ficam entre 'Os sócios:' (ilvl=N) e
-    'Acima qualificados' como parágrafos numerados (ilvl=N+1) em negrito,
-    contendo apenas o nome — sem qualificação (sem CPF, CRM, endereço).
+    Regra: parágrafos **bold**, sem texto de qualificação (CPF, CRM, etc.)
+    e sem vírgula (só o nome), localizados entre 'Os sócios:' e
+    'Acima qualificados' no Capital Social.
 
-    Funciona tanto para QUALIFEMME (1.2.1./1.2.2.) quanto OPTIMUM e outros.
+    Funciona para QUALIFEMME (ilvl=0) e OPTIMUM (ilvl=2) e qualquer empresa.
     """
-    from docx.oxml.ns import qn as _qn
     doc = Document(io.BytesIO(docx_bytes))
     nomes = []
     in_retirantes = False
-    os_socios_ilvl = None
 
-    QUALIFICACAO_KWS = ('médico', 'médica', 'cpf', 'crm', 'rg nº', 'cep',
-                        'nascido', 'nascida', 'inscrito', 'inscrita', 'portador')
+    # Palavras que indicam qualificação — parágrafo com qualquer uma dessas NÃO é retirante
+    QUALIFICACAO_KWS = (
+        'médico', 'médica', 'cpf', 'crm', 'rg nº', 'cep',
+        'nascido', 'nascida', 'inscrito', 'inscrita', 'portador',
+        'portadora', 'residente', 'domiciliado', 'domiciliada',
+        'empresária', 'empresário', 'brasileiro', 'brasileira',
+    )
 
     for p in doc.paragraphs:
         txt = p.text.strip()
 
-        # ── Detectar cabeçalho "Os sócios:" ──────────────────────────
-        if txt in ('Os sócios:', 'Os sócios') or txt.endswith('Os sócios:'):
-            in_retirantes = True
-            pPr = p._p.find(_qn('w:pPr'))
-            if pPr is not None:
-                numPr = pPr.find(_qn('w:numPr'))
-                if numPr is not None:
-                    il = numPr.find(_qn('w:ilvl'))
-                    if il is not None:
-                        try:
-                            os_socios_ilvl = int(il.get(_qn('w:val')))
-                        except (TypeError, ValueError):
-                            os_socios_ilvl = None
+        # ── Início: localizar cabeçalho "Os sócios:" na seção 1.2 ────
+        # Pode vir como texto puro ou como item numerado automaticamente pelo Word
+        if not in_retirantes:
+            if txt in ('Os sócios:', 'Os sócios') or txt.endswith('Os sócios:'):
+                in_retirantes = True
             continue
 
-        # ── Fim da seção ──────────────────────────────────────────────
-        if in_retirantes and txt.startswith('Acima qualificados'):
+        # ── Fim: parar ao encontrar "Acima qualificados" ──────────────
+        if txt.startswith('Acima qualificados'):
             break
 
-        # ── Dentro da seção: identificar nomes ───────────────────────
-        if not in_retirantes or not txt:
+        # ── Pular parágrafos vazios ────────────────────────────────────
+        if not txt:
             continue
 
-        # Verificar se parece qualificação (não é um nome de retirante)
+        # ── Descartar se contém texto de qualificação ─────────────────
         txt_lower = txt.lower()
-        has_qualification = any(kw in txt_lower for kw in QUALIFICACAO_KWS)
-        if has_qualification:
+        if any(kw in txt_lower for kw in QUALIFICACAO_KWS):
             continue
 
-        # Verificar numPr: retirantes têm ilvl = os_socios_ilvl + 1
-        pPr = p._p.find(_qn('w:pPr'))
-        numPr = pPr.find(_qn('w:numPr')) if pPr is not None else None
+        # ── Descartar se contém vírgula (qualificação ou cessão) ──────
+        # Nomes de retirantes são sem vírgula; cessões (1.1.x) têm vírgulas
+        if ',' in txt:
+            continue
+
+        # ── Aceitar: parágrafo bold com apenas o nome ─────────────────
         is_bold = any(r.font.bold for r in p.runs if r.font.bold is True)
-
-        if numPr is not None:
-            il = numPr.find(_qn('w:ilvl'))
-            if il is not None:
-                try:
-                    ilvl = int(il.get(_qn('w:val')))
-                    # ilvl deve ser 1 nível abaixo de "Os sócios:"
-                    expected = (os_socios_ilvl + 1) if os_socios_ilvl is not None else ilvl
-                    if ilvl == expected and is_bold:
-                        nomes.append(txt)
-                        continue
-                except (TypeError, ValueError):
-                    pass
-
-        # Fallback: parágrafo bold, sem vírgula, entre as marcas certas
-        if is_bold and ',' not in txt and len(txt) > 5:
+        if is_bold and len(txt) > 5:
             nomes.append(txt)
 
     return nomes
