@@ -17,7 +17,7 @@ from scripts.build_acs import gerar_acs, sem_acento, ler_ingressantes_excel
 app = FastAPI(
     title="MedAssist AUTO API",
     description="API para geração automática de minutas ACS e planilhas DBE",
-    version="1.2.0"
+    version="1.3.0"
 )
 
 app.add_middleware(
@@ -62,27 +62,75 @@ def gerar_planilha_dbe(dados: list[dict]) -> bytes:
 
 def extrair_nomes_retirantes_do_docx(docx_bytes: bytes) -> list[str]:
     """
-    Extrai AUTOMATICAMENTE os nomes dos retirantes da minuta registrada.
-    Os retirantes ficam entre 'Os sócios:' e 'Acima qualificados' na seção
-    Capital Social. São parágrafos curtos contendo apenas o nome (sem vírgula
-    de qualificação) — diferente dos sócios do preâmbulo que têm qualificação.
+    Extrai AUTOMATICAMENTE os nomes dos retirantes da minuta.
+
+    Padrão Word: os retirantes ficam entre 'Os sócios:' (ilvl=N) e
+    'Acima qualificados' como parágrafos numerados (ilvl=N+1) em negrito,
+    contendo apenas o nome — sem qualificação (sem CPF, CRM, endereço).
+
+    Funciona tanto para QUALIFEMME (1.2.1./1.2.2.) quanto OPTIMUM e outros.
     """
+    from docx.oxml.ns import qn as _qn
     doc = Document(io.BytesIO(docx_bytes))
-    paras = doc.paragraphs
     nomes = []
     in_retirantes = False
+    os_socios_ilvl = None
 
-    for p in paras:
+    QUALIFICACAO_KWS = ('médico', 'médica', 'cpf', 'crm', 'rg nº', 'cep',
+                        'nascido', 'nascida', 'inscrito', 'inscrita', 'portador')
+
+    for p in doc.paragraphs:
         txt = p.text.strip()
-        # Início da seção de retirantes
-        if txt == 'Os sócios:':
+
+        # ── Detectar cabeçalho "Os sócios:" ──────────────────────────
+        if txt in ('Os sócios:', 'Os sócios') or txt.endswith('Os sócios:'):
             in_retirantes = True
+            pPr = p._p.find(_qn('w:pPr'))
+            if pPr is not None:
+                numPr = pPr.find(_qn('w:numPr'))
+                if numPr is not None:
+                    il = numPr.find(_qn('w:ilvl'))
+                    if il is not None:
+                        try:
+                            os_socios_ilvl = int(il.get(_qn('w:val')))
+                        except (TypeError, ValueError):
+                            os_socios_ilvl = None
             continue
-        # Fim da seção
+
+        # ── Fim da seção ──────────────────────────────────────────────
         if in_retirantes and txt.startswith('Acima qualificados'):
             break
-        # Dentro da seção: parágrafo com nome (sem vírgula = só o nome, sem qualificação)
-        if in_retirantes and txt and ',' not in txt and len(txt) > 5:
+
+        # ── Dentro da seção: identificar nomes ───────────────────────
+        if not in_retirantes or not txt:
+            continue
+
+        # Verificar se parece qualificação (não é um nome de retirante)
+        txt_lower = txt.lower()
+        has_qualification = any(kw in txt_lower for kw in QUALIFICACAO_KWS)
+        if has_qualification:
+            continue
+
+        # Verificar numPr: retirantes têm ilvl = os_socios_ilvl + 1
+        pPr = p._p.find(_qn('w:pPr'))
+        numPr = pPr.find(_qn('w:numPr')) if pPr is not None else None
+        is_bold = any(r.font.bold for r in p.runs if r.font.bold is True)
+
+        if numPr is not None:
+            il = numPr.find(_qn('w:ilvl'))
+            if il is not None:
+                try:
+                    ilvl = int(il.get(_qn('w:val')))
+                    # ilvl deve ser 1 nível abaixo de "Os sócios:"
+                    expected = (os_socios_ilvl + 1) if os_socios_ilvl is not None else ilvl
+                    if ilvl == expected and is_bold:
+                        nomes.append(txt)
+                        continue
+                except (TypeError, ValueError):
+                    pass
+
+        # Fallback: parágrafo bold, sem vírgula, entre as marcas certas
+        if is_bold and ',' not in txt and len(txt) > 5:
             nomes.append(txt)
 
     return nomes
