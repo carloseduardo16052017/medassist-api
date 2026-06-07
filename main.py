@@ -17,7 +17,7 @@ from scripts.build_acs import gerar_acs, sem_acento, ler_ingressantes_excel
 app = FastAPI(
     title="MedAssist AUTO API",
     description="API para geração automática de minutas ACS e planilhas DBE",
-    version="1.1.0"
+    version="1.2.0"
 )
 
 app.add_middleware(
@@ -60,43 +60,75 @@ def gerar_planilha_dbe(dados: list[dict]) -> bytes:
     return output.read()
 
 
-def extrair_retirantes_docx(docx_bytes: bytes, retirantes_nomes: list[str]) -> list[dict]:
+def extrair_nomes_retirantes_do_docx(docx_bytes: bytes) -> list[str]:
     """
-    Extrai dados dos retirantes da última ACS (.docx).
-    Busca os parágrafos com os nomes dos retirantes e extrai CPF e endereço.
+    Extrai AUTOMATICAMENTE os nomes dos retirantes da minuta registrada.
+    Os retirantes ficam entre 'Os sócios:' e 'Acima qualificados' na seção
+    Capital Social. São parágrafos curtos contendo apenas o nome (sem vírgula
+    de qualificação) — diferente dos sócios do preâmbulo que têm qualificação.
     """
     doc = Document(io.BytesIO(docx_bytes))
-    retirantes_norm = {sem_acento(n) for n in retirantes_nomes}
+    paras = doc.paragraphs
+    nomes = []
+    in_retirantes = False
+
+    for p in paras:
+        txt = p.text.strip()
+        # Início da seção de retirantes
+        if txt == 'Os sócios:':
+            in_retirantes = True
+            continue
+        # Fim da seção
+        if in_retirantes and txt.startswith('Acima qualificados'):
+            break
+        # Dentro da seção: parágrafo com nome (sem vírgula = só o nome, sem qualificação)
+        if in_retirantes and txt and ',' not in txt and len(txt) > 5:
+            nomes.append(txt)
+
+    return nomes
+
+
+def extrair_dados_retirantes_docx(docx_bytes: bytes) -> list[dict]:
+    """
+    1. Extrai os nomes dos retirantes automaticamente da seção 1.2.
+    2. Busca a qualificação completa de cada retirante no preâmbulo da minuta.
+    3. Extrai CPF, CEP, número e complemento de cada qualificação.
+    """
+    import re
+    doc = Document(io.BytesIO(docx_bytes))
+
+    # Passo 1: obter nomes dos retirantes
+    nomes_retirantes = extrair_nomes_retirantes_do_docx(docx_bytes)
+    if not nomes_retirantes:
+        return []
+
+    retirantes_norm = {sem_acento(n): n for n in nomes_retirantes}
     resultado = []
 
+    # Passo 2: buscar qualificação no preâmbulo
     for p in doc.paragraphs:
         txt = p.text.strip()
-        if not txt:
+        if not txt or ',' not in txt:
             continue
         nome_p = sem_acento(txt.split(',')[0].strip())
         if nome_p not in retirantes_norm:
             continue
 
-        # Extrair CPF do texto do parágrafo
-        import re
+        # Extrair campos
         cpf_match = re.search(r'CPF sob n[°º]\s*([\d]{3}\.[\d]{3}\.[\d]{3}-[\d]{2})', txt)
         cpf = cpf_match.group(1) if cpf_match else ''
 
-        # Extrair CEP
         cep_match = re.search(r'CEP\s*([\d]{5}-?[\d]{3})', txt)
         cep = cep_match.group(1).replace('-', '') if cep_match else ''
 
-        # Extrair número do endereço
         num_match = re.search(r'n[°º]\s*(\d+)', txt)
         numero = num_match.group(1) if num_match else ''
 
-        # Extrair complemento (entre número e bairro/CEP)
-        comp_match = re.search(r'n[°º]\s*\d+[,\s]+([^,]+),\s*[A-ZÁÉÍÓÚ]', txt)
+        comp_match = re.search(r'n[°º]\s*\d+\s*,\s*([^,]+),\s*\w', txt)
         complemento = comp_match.group(1).strip() if comp_match else ''
 
-        nome_real = txt.split(',')[0].strip()
         resultado.append({
-            'nome': nome_real,
+            'nome': retirantes_norm[nome_p],
             'cpf': cpf,
             'cep': cep,
             'numero': numero,
@@ -192,24 +224,19 @@ async def gerar_dbe_ingressantes(
 @app.post("/gerar-dbe-retirantes")
 async def gerar_dbe_retirantes(
     minuta: UploadFile = File(..., description="Última ACS registrada (.docx)"),
-    retirantes: str = Form(..., description='JSON array com nomes dos retirantes. Ex: ["NOME 1","NOME 2"]'),
 ):
     """
     Gera planilha DBE dos sócios RETIRANTES.
-    Extrai dados da minuta registrada (.docx) e formata para o DBE.
+    Extrai automaticamente os nomes e dados dos retirantes da minuta (.docx).
+    Não é necessário informar os nomes separadamente.
     """
     try:
-        retirantes_list = json.loads(retirantes)
-    except json.JSONDecodeError as e:
-        raise HTTPException(status_code=400, detail=f"JSON inválido: {e}")
-
-    try:
         docx_bytes = await minuta.read()
-        dados = extrair_retirantes_docx(docx_bytes, retirantes_list)
+        dados = extrair_dados_retirantes_docx(docx_bytes)
         if not dados:
             raise HTTPException(
                 status_code=404,
-                detail=f"Nenhum retirante encontrado na minuta. Verifique os nomes: {retirantes_list}"
+                detail="Nenhum retirante encontrado na seção '1.2. Os sócios:' da minuta."
             )
         xlsx_bytes = gerar_planilha_dbe(dados)
     except HTTPException:
