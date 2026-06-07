@@ -18,7 +18,7 @@ from scripts.build_acs import gerar_acs, sem_acento, ler_ingressantes_excel
 app = FastAPI(
     title="MedAssist AUTO API",
     description="API para geração automática de minutas ACS e planilhas DBE",
-    version="1.8.0"
+    version="1.9.0"
 )
 
 app.add_middleware(
@@ -369,11 +369,29 @@ def extrair_nome_empresa_da_minuta(docx_bytes: bytes) -> str:
     return ""
 
 
+def _make_run_elem(text: str, bold: bool = False) -> object:
+    """Cria um elemento <w:r> com Calibri (minorHAnsi) 9pt e bold opcional."""
+    from docx.oxml import OxmlElement
+    from docx.oxml.ns import qn
+    r = OxmlElement('w:r')
+    rPr = OxmlElement('w:rPr')
+    rFonts = OxmlElement('w:rFonts')
+    rFonts.set(qn('w:asciiTheme'), 'minorHAnsi')
+    rFonts.set(qn('w:hAnsiTheme'), 'minorHAnsi')
+    sz   = OxmlElement('w:sz');   sz.set(qn('w:val'), '18')    # 9pt = 18 half-points
+    szCs = OxmlElement('w:szCs'); szCs.set(qn('w:val'), '18')
+    if bold:
+        b = OxmlElement('w:b'); rPr.append(b)
+    rPr.append(rFonts); rPr.append(sz); rPr.append(szCs)
+    r.append(rPr)
+    t = OxmlElement('w:t'); t.text = text
+    t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
+    r.append(t)
+    return r
+
+
 def _replace_text_in_para(para, old: str, new: str):
-    """
-    Substitui texto em um parágrafo preservando a formatação do primeiro run.
-    Concatena todos os runs, faz a substituição e coloca tudo no primeiro run.
-    """
+    """Substitui texto simples mantendo todos os runs inalterados."""
     full = ''.join(r.text for r in para.runs)
     if old not in full:
         return False
@@ -383,6 +401,26 @@ def _replace_text_in_para(para, old: str, new: str):
         for r in para.runs[1:]:
             r.text = ''
     return True
+
+
+def _replace_with_bold_segment(para, full_new_text: str, bold_segment: str):
+    """
+    Reescreve um parágrafo com Calibri 9pt, deixando bold_segment em negrito.
+    Remove todos os runs existentes e cria novos com a formatação correta.
+    """
+    from docx.oxml.ns import qn
+    # Remover runs existentes
+    for r in list(para._p.findall(qn('w:r'))):
+        para._p.remove(r)
+    if bold_segment and bold_segment in full_new_text:
+        idx   = full_new_text.index(bold_segment)
+        before = full_new_text[:idx]
+        after  = full_new_text[idx + len(bold_segment):]
+        if before: para._p.append(_make_run_elem(before, bold=False))
+        para._p.append(_make_run_elem(bold_segment, bold=True))
+        if after:  para._p.append(_make_run_elem(after,  bold=False))
+    else:
+        para._p.append(_make_run_elem(full_new_text, bold=False))
 
 
 def gerar_declaracao_autenticidade_docx(
@@ -418,18 +456,21 @@ def gerar_declaracao_autenticidade_docx(
     tpl_path = os.path.join(base_dir, 'templates', 'declaracao_autenticidade_template.docx')
     doc = Document(tpl_path)
 
-    # ── 1. Substituir nome da empresa no item 2 ──────────────────────
+    # ── 1. Item 2 — nome da empresa em negrito ───────────────────────
+    empresa_nova = nome_empresa or 'QUALIFEMME SERVIÇOS MÉDICOS LTDA'
     for p in doc.paragraphs:
         txt = ''.join(r.text for r in p.runs)
         if 'QUALIFEMME SERVIÇOS MÉDICOS LTDA' in txt and 'Procuração outorgada' in txt:
-            _replace_text_in_para(p, 'QUALIFEMME SERVIÇOS MÉDICOS LTDA', nome_empresa or 'QUALIFEMME SERVIÇOS MÉDICOS LTDA')
+            novo_txt = txt.replace('QUALIFEMME SERVIÇOS MÉDICOS LTDA', empresa_nova)
+            _replace_with_bold_segment(p, novo_txt, empresa_nova)
             break
 
-    # ── 2. Substituir nome do representante no item 3 ────────────────
+    # ── 2. Item 3 — nome do representante em negrito ─────────────────
     for p in doc.paragraphs:
         txt = ''.join(r.text for r in p.runs)
         if 'Marcelo Costa Moreira' in txt and 'outorgada para' in txt:
-            _replace_text_in_para(p, 'Marcelo Costa Moreira', nome_representante)
+            novo_txt = txt.replace('Marcelo Costa Moreira', nome_representante)
+            _replace_with_bold_segment(p, novo_txt, nome_representante)
             break
 
     # ── 3. Substituir data ───────────────────────────────────────────
@@ -463,21 +504,14 @@ def gerar_declaracao_autenticidade_docx(
             cells = new_tr.findall(f'{{{qn("w:tc").split("}")[0][1:]}}}tc') if False else \
                     new_tr.findall('{http://schemas.openxmlformats.org/wordprocessingml/2006/main}tc')
 
-            # Limpar e definir conteúdo das células
+            # Limpar e definir conteúdo das células — Calibri 9pt explícito
             def set_tc_text(tc_elem, text, bold=False):
                 NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
                 for p_elem in tc_elem.findall(f'{{{NS}}}p'):
                     for r_elem in list(p_elem.findall(f'{{{NS}}}r')):
                         p_elem.remove(r_elem)
-                    # Criar run com o texto
-                    r_new = OxmlElement('w:r')
-                    rPr = OxmlElement('w:rPr')
-                    if bold:
-                        b = OxmlElement('w:b'); rPr.append(b)
-                    r_new.append(rPr)
-                    t = OxmlElement('w:t'); t.text = text
-                    t.set('{http://www.w3.org/XML/1998/namespace}space', 'preserve')
-                    r_new.append(t); p_elem.append(r_new)
+                    r_new = _make_run_elem(text, bold=bold)
+                    p_elem.append(r_new)
 
             if len(cells) >= 2:
                 set_tc_text(cells[0], nome.upper(), bold=True)
