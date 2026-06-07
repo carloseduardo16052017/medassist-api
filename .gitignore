@@ -4,5 +4,8 @@ __pycache__/
 .env
 .venv
 venv/
+# Ignorar docx/xlsx gerados (uploads e saídas)
 *.docx
 *.xlsx
+# Mas permitir o template oficial
+!templates/*.docx
