@@ -17,7 +17,7 @@ from scripts.build_acs import gerar_acs, sem_acento, ler_ingressantes_excel
 app = FastAPI(
     title="MedAssist AUTO API",
     description="API para geração automática de minutas ACS e planilhas DBE",
-    version="1.3.0"
+    version="1.4.0"
 )
 
 app.add_middleware(
@@ -64,56 +64,88 @@ def extrair_nomes_retirantes_do_docx(docx_bytes: bytes) -> list[str]:
     """
     Extrai AUTOMATICAMENTE os nomes dos retirantes da seção 1.2.
 
-    Regra: parágrafos **bold**, sem texto de qualificação (CPF, CRM, etc.)
-    e sem vírgula (só o nome), localizados entre 'Os sócios:' e
-    'Acima qualificados' no Capital Social.
-
-    Funciona para QUALIFEMME (ilvl=0) e OPTIMUM (ilvl=2) e qualquer empresa.
+    Suporta dois formatos:
+    1. TABELA após "Os sócios:" — formato das minutas registradas na QUALIFEMME
+       (cada linha da tabela = um retirante)
+    2. PARÁGRAFOS bold numerados (1.2.1., 1.2.2...) — formato gerado pelo sistema
+       e usado na OPTIMUM
     """
+    from docx.oxml.ns import qn as _qn
+
     doc = Document(io.BytesIO(docx_bytes))
     nomes = []
-    in_retirantes = False
 
-    # Palavras que indicam qualificação — parágrafo com qualquer uma dessas NÃO é retirante
     QUALIFICACAO_KWS = (
         'médico', 'médica', 'cpf', 'crm', 'rg nº', 'cep',
         'nascido', 'nascida', 'inscrito', 'inscrita', 'portador',
         'portadora', 'residente', 'domiciliado', 'domiciliada',
         'empresária', 'empresário', 'brasileiro', 'brasileira',
     )
+    NS = 'http://schemas.openxmlformats.org/wordprocessingml/2006/main'
 
-    for p in doc.paragraphs:
-        txt = p.text.strip()
+    body = doc.element.body
+    found_os_socios = False
+    para_idx = 0  # índice paralelo para acessar doc.paragraphs
 
-        # ── Início: localizar cabeçalho "Os sócios:" na seção 1.2 ────
-        # Pode vir como texto puro ou como item numerado automaticamente pelo Word
-        if not in_retirantes:
-            if txt in ('Os sócios:', 'Os sócios') or txt.endswith('Os sócios:'):
-                in_retirantes = True
-            continue
+    for elem in body:
+        tag = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
 
-        # ── Fim: parar ao encontrar "Acima qualificados" ──────────────
-        if txt.startswith('Acima qualificados'):
+        # ── Elemento parágrafo ────────────────────────────────────────
+        if tag == 'p':
+            if para_idx >= len(doc.paragraphs):
+                para_idx += 1
+                continue
+            p = doc.paragraphs[para_idx]
+            txt = p.text.strip()
+            para_idx += 1
+
+            if not found_os_socios:
+                # Localizar "Os sócios:" na seção Capital Social
+                if txt in ('Os sócios:', 'Os sócios') or txt.endswith('Os sócios:'):
+                    found_os_socios = True
+                continue
+
+            # Fim da seção de retirantes
+            if txt.startswith('Acima qualificados') or txt.startswith('Os sócios ingressantes'):
+                break
+
+            if not txt:
+                continue
+
+            # Descartar qualificações e cessões
+            txt_lower = txt.lower()
+            if any(kw in txt_lower for kw in QUALIFICACAO_KWS):
+                continue
+            if ',' in txt:
+                continue
+
+            # Formato 2: parágrafo bold = nome de retirante (OPTIMUM e ACS geradas)
+            is_bold = any(r.font.bold for r in p.runs if r.font.bold is True)
+            if is_bold and len(txt) > 5:
+                nomes.append(txt)
+
+        # ── Elemento tabela ───────────────────────────────────────────
+        elif tag == 'tbl' and found_os_socios:
+            # Formato 1: tabela de retirantes (QUALIFEMME minutas registradas)
+            # Cada linha da tabela contém o nome de um retirante
+            for tr in elem.findall(f'{{{NS}}}tr'):
+                # Concatenar texto de todas as células da linha
+                cells_text = []
+                for t_elem in tr.iter(f'{{{NS}}}t'):
+                    if t_elem.text:
+                        cells_text.append(t_elem.text)
+                nome = ' '.join(cells_text).strip()
+                # Descartar cabeçalhos e linhas com qualificação
+                nome_lower = nome.lower()
+                if not nome or len(nome) < 5:
+                    continue
+                if any(kw in nome_lower for kw in QUALIFICACAO_KWS):
+                    continue
+                if ',' in nome:
+                    continue
+                nomes.append(nome)
+            # Após processar a tabela de retirantes, parar
             break
-
-        # ── Pular parágrafos vazios ────────────────────────────────────
-        if not txt:
-            continue
-
-        # ── Descartar se contém texto de qualificação ─────────────────
-        txt_lower = txt.lower()
-        if any(kw in txt_lower for kw in QUALIFICACAO_KWS):
-            continue
-
-        # ── Descartar se contém vírgula (qualificação ou cessão) ──────
-        # Nomes de retirantes são sem vírgula; cessões (1.1.x) têm vírgulas
-        if ',' in txt:
-            continue
-
-        # ── Aceitar: parágrafo bold com apenas o nome ─────────────────
-        is_bold = any(r.font.bold for r in p.runs if r.font.bold is True)
-        if is_bold and len(txt) > 5:
-            nomes.append(txt)
 
     return nomes
 
