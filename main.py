@@ -796,24 +796,25 @@ def _fr(v):
     return _re.sub(r'[.\-/\s]','',str(v))
 
 def _retirantes(docx_bytes):
-    import io as _io
-    from docx import Document as _D
+        import io as _io; from docx import Document as _D; from docx.oxml.ns import qn as _qn
     doc = _D(_io.BytesIO(docx_bytes))
-    txt = '\n'.join(p.text for p in doc.paragraphs)
-    for t in doc.tables:
-        for row in t.rows:
-            for c in row.cells: txt += '\n' + c.text
-    nomes = set()
-    bloco = _re.search(r'[Oo]s\s+sócios[:\s]*(.*?)retirando-se.*?quadro\s+de\s+sócios', txt, _re.DOTALL)
-    if bloco:
-        for c in _re.findall(r'([A-ZÁÀÂÃÉÊÍÓÔÕÚÜÇ][A-ZÁÀÂÃÉÊÍÓÔÕÚÜÇ\s]{5,})', bloco.group(1)):
-            n = ' '.join(c.split()).upper()
-            if len(n) > 8: nomes.add(n)
+    retirante_names = []; found_socios = False; found_retirando = False
+    for _child in doc.element.body:
+        _tag = _child.tag.split('}')[-1] if '}' in _child.tag else _child.tag
+        if _tag == 'p':
+            _txt = ''.join(_t.text or '' for _t in _child.findall('.//' + _qn('w:t')))
+            if _txt.strip().endswith('cios:') and not found_socios: found_socios = True
+            elif found_socios and not found_retirando and 'retirando-se' in _txt.lower(): found_retirando = True; break
+        elif _tag == 'tbl' and found_socios and not found_retirando:
+            for _cell in _child.findall('.//' + _qn('w:tc')):
+                _ct = ''.join(_t.text or '' for _t in _cell.findall('.//' + _qn('w:t'))).strip()
+                if _ct and len(_ct) > 5: retirante_names.append(_ct)
     result = []
-    for nm, cpf in _re.findall(r'([A-ZÁÀÂÃÉÊÍÓÔÕÚÜÇ][A-ZÁÀÂÃÉÊÍÓÔÕÚÜÇa-záàâãéêíóôõúüç\s]+?).*?CPF\s+sob\s+n[oº°\.]+\s*([\d]{3}\.[\d]{3}\.[\d]{3}-[\d]{2})', txt, _re.DOTALL):
-        n = ' '.join(nm.split()).upper()
-        if n in nomes:
-            result.append({'nome': n, 'cpf': _re.sub(r'[.\-]','',cpf).zfill(11)})
+    for _nm in retirante_names:
+        for _p in doc.paragraphs:
+            if _p.text.strip().startswith(_nm):
+                _m = _re.search('CPF sob n[^ ]* *([0-9]{3}[.][0-9]{3}[.][0-9]{3}-[0-9]{2})', _p.text)
+                if _m: result.append({'nome': _nm, 'cpf': _re.sub('[.-]','',_m.group(1)).zfill(11)}); break
     return result
 
 @app.post("/gerar-vre")
