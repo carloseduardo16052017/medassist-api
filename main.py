@@ -758,3 +758,108 @@ async def converter_para_pdf(
         media_type="application/pdf",
         headers={"Content-Disposition": f'attachment; filename="{nome_base}.pdf"'}
     )
+
+python
+
+# ── /gerar-vre ──────────────────────────────────────────────
+import re as _re, shutil as _shutil, tempfile as _tempfile, os as _os
+from openpyxl import load_workbook as _load_workbook
+
+def _parse_ec(raw):
+    if not raw or str(raw).strip() in ('', 'nan'): return 'Outros', None
+    r = str(raw).lower()
+    if 'casado' in r:
+        m = _re.search(r'sob o regime d[ao]? (.+)', r)
+        reg = m.group(1).strip().capitalize() if m else None
+        if reg and 'separa' in reg.lower(): reg = 'Separação de bens'
+        return 'Casado(a)', reg
+    if 'solteiro' in r: return 'Solteiro(a)', None
+    if 'divorciado' in r: return 'Divorciado(a)', None
+    if 'viú' in r or 'viuv' in r: return 'Viuvo(a)', None
+    if 'desquitado' in r: return 'Desquitado(a)', None
+    if 'separado' in r and 'judicial' in r: return 'Separado(a) Judicialmente', None
+    return 'Outros', None
+
+def _fc(v):
+    if not v or str(v).lower()=='nan': return None
+    return _re.sub(r'[.\-]','',str(v)).zfill(11)
+
+def _fd(v):
+    if not v or str(v).lower()=='nan': return None
+    p = _re.split(r'[/\-.]', str(v).strip())
+    if len(p)==3: return f"{p[0].zfill(2)}{p[1].zfill(2)}{p[2]}"
+    c = _re.sub(r'[/\-.]','',str(v))
+    return c.zfill(8) if c.isdigit() else v
+
+def _fr(v):
+    if not v or str(v).lower()=='nan': return None
+    return _re.sub(r'[.\-/\s]','',str(v))
+
+def _retirantes(docx_bytes):
+    import io as _io
+    from docx import Document as _D
+    doc = _D(_io.BytesIO(docx_bytes))
+    txt = '\n'.join(p.text for p in doc.paragraphs)
+    for t in doc.tables:
+        for row in t.rows:
+            for c in row.cells: txt += '\n' + c.text
+    nomes = set()
+    bloco = _re.search(r'[Oo]s\s+sócios[:\s]*(.*?)retirando-se.*?quadro\s+de\s+sócios', txt, _re.DOTALL)
+    if bloco:
+        for c in _re.findall(r'([A-ZÁÀÂÃÉÊÍÓÔÕÚÜÇ][A-ZÁÀÂÃÉÊÍÓÔÕÚÜÇ\s]{5,})', bloco.group(1)):
+            n = ' '.join(c.split()).upper()
+            if len(n) > 8: nomes.add(n)
+    result = []
+    for nm, cpf in _re.findall(r'([A-ZÁÀÂÃÉÊÍÓÔÕÚÜÇ][A-ZÁÀÂÃÉÊÍÓÔÕÚÜÇa-záàâãéêíóôõúüç\s]+?).*?CPF\s+sob\s+n[oº°\.]+\s*([\d]{3}\.[\d]{3}\.[\d]{3}-[\d]{2})', txt, _re.DOTALL):
+        n = ' '.join(nm.split()).upper()
+        if n in nomes:
+            result.append({'nome': n, 'cpf': _re.sub(r'[.\-]','',cpf).zfill(11)})
+    return result
+
+@app.post("/gerar-vre")
+async def gerar_vre(relatorio: UploadFile = File(...), minuta: UploadFile = File(...)):
+    tmp = _tempfile.mkdtemp()
+    try:
+        rp = _os.path.join(tmp,"r.xlsx"); mp = _os.path.join(tmp,"m.docx"); op = _os.path.join(tmp,"VRE.xlsx")
+        with open(rp,"wb") as f: f.write(await relatorio.read())
+        mb = await minuta.read()
+        with open(mp,"wb") as f: f.write(mb)
+        df = pd.read_excel(rp, sheet_name='MeusDados')
+        df = df[df['Status do documento']=='Finalizado'].copy()
+        rets = _retirantes(mb)
+        _shutil.copy("modelos/JUCESP_MISTA_FINAL_.xlsx", op)
+        wb = _load_workbook(op)
+        ws = wb['Dados']
+        for row in ws.iter_rows():
+            for cell in row: cell.value = None
+        for i,(_, r) in enumerate(df.iterrows(), start=1):
+            ec, reg = _parse_ec(r.get('Formulário 1 Qual o seu estado civil?'))
+            nac = r.get('Formulário 1 Qual a sua nacionalidade?')
+            ws.cell(i,1).value = r.get('Formulário 1 Qual o seu nome completo?')
+            ws.cell(i,2).value = _fc(r.get('Formulário 1 Qual o seu CPF?'))
+            ws.cell(i,3).value = _fd(r.get('Formulário 1 Qual a sua data de nascimento?'))
+            ws.cell(i,4).value = _fr(r.get('Formulário 1 Qual o número do seu RG ou RNE (caso estrangeiro)?'))
+            ws.cell(i,5).value = r.get('Formulário 1 Qual o órgão emissor do seu RG ou RNE (caso estrangeiro)?')
+            ws.cell(i,6).value = r.get('Formulário 1 Qual o Estado (UF) de Emissão do seu RG ou RNE (caso estrangeiro)?')
+            ws.cell(i,7).value = (str(nac)[0].upper()+str(nac)[1:]) if nac and str(nac).lower()!='nan' else None
+            ws.cell(i,8).value = 'Médico(a)'
+            ws.cell(i,9).value = ec
+            ws.cell(i,10).value = reg
+            ws.cell(i,11).value = 'Não Declarada'
+            ws.cell(i,12).value = r.get('Formulário 1 CEP')
+            ws.cell(i,13).value = r.get('Formulário 1 Número')
+            ws.cell(i,14).value = r.get('Formulário 1 Complemento de endereço')
+        ws_r = wb['Retirantes']
+        ws_r.cell(1,1).value='CPF'; ws_r.cell(1,2).value='Nome'
+        for row in ws_r.iter_rows(min_row=2):
+            for cell in row: cell.value=None
+        for i,ret in enumerate(rets,start=2):
+            ws_r.cell(i,1).value=ret['cpf']; ws_r.cell(i,2).value=ret['nome']
+        wb.save(op)
+        with open(op,"rb") as f: content=f.read()
+        return Response(content=content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition":"attachment; filename=VRE_JUCESP.xlsx"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _shutil.rmtree(tmp, ignore_errors=True)
