@@ -759,7 +759,7 @@ async def converter_para_pdf(
         headers={"Content-Disposition": f'attachment; filename="{nome_base}.pdf"'}
     )
 
-python
+
 
 # ── /gerar-vre ──────────────────────────────────────────────
 import re as _re, shutil as _shutil, tempfile as _tempfile, os as _os
