@@ -827,7 +827,7 @@ async def gerar_vre(relatorio: UploadFile = File(...), minuta: UploadFile = File
         df = pd.read_excel(rp, sheet_name='MeusDados')
         df = df[df['Status do documento']=='Finalizado'].copy()
         rets = _retirantes(mb)
-        _shutil.copy(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "modelos", "JUCESP_MISTA_FINAL_.xlsx"), op)
+        from openpyxl import Workbook as _WBB; _wbb=_WBB(); _wbb.active.title='Dados'; _wbb.create_sheet('Retirantes'); _wbb.save(op)(_os.path.join(_os.path.dirname(_os.path.abspath(__file__)), "modelos", "JUCESP_MISTA_FINAL_.xlsx"), op)
         wb = _load_workbook(op)
         ws = wb['Dados']
         for row in ws.iter_rows():
