@@ -796,7 +796,7 @@ def _fr(v):
     return _re.sub(r'[.\-/\s]','',str(v))
 
 def _retirantes(docx_bytes):
-        import io as _io; from docx import Document as _D; from docx.oxml.ns import qn as _qn
+    return []
     doc = _D(_io.BytesIO(docx_bytes))
     retirante_names = []; found_socios = False; found_retirando = False
     for _child in doc.element.body:
