@@ -864,3 +864,64 @@ async def gerar_vre(relatorio: UploadFile = File(...), minuta: UploadFile = File
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         _shutil.rmtree(tmp, ignore_errors=True)
+
+
+@app.post("/gerar-vre-ingressantes")
+async def gerar_vre_ingressantes(relatorio: UploadFile = File(...)):
+    tmp = _tempfile.mkdtemp()
+    try:
+        rp = _os.path.join(tmp,"r.xlsx"); op = _os.path.join(tmp,"VRE_Ingressantes.xlsx")
+        with open(rp,"wb") as f: f.write(await relatorio.read())
+        df = pd.read_excel(rp, sheet_name='MeusDados')
+        df = df[df['Status do documento']=='Finalizado'].copy()
+        from openpyxl import Workbook as _WBB; _wbb=_WBB(); _wbb.active.title='Dados'; _wbb.save(op)
+        wb = _load_workbook(op)
+        ws = wb['Dados']
+        for i,(_, r) in enumerate(df.iterrows(), start=1):
+            ec, reg = _parse_ec(r.get('Formulário 1 Qual o seu estado civil?'))
+            nac = r.get('Formulário 1 Qual a sua nacionalidade?')
+            ws.cell(i,1).value = r.get('Formulário 1 Qual o seu nome completo?')
+            ws.cell(i,2).value = _fc(r.get('Formulário 1 Qual o seu CPF?'))
+            ws.cell(i,3).value = _fd(r.get('Formulário 1 Qual a sua data de nascimento?'))
+            ws.cell(i,4).value = _fr(r.get('Formulário 1 Qual o número do seu RG ou RNE (caso estrangeiro)?'))
+            ws.cell(i,5).value = r.get('Formulário 1 Qual o órgão emissor do seu RG ou RNE (caso estrangeiro)?')
+            ws.cell(i,6).value = r.get('Formulário 1 Qual o Estado (UF) de Emissão do seu RG ou RNE (caso estrangeiro)?')
+            ws.cell(i,7).value = (str(nac)[0].upper()+str(nac)[1:]) if nac and str(nac).lower()!='nan' else None
+            ws.cell(i,8).value = 'Médico(a)'
+            ws.cell(i,9).value = ec
+            ws.cell(i,10).value = reg
+            ws.cell(i,11).value = 'Não Declarada'
+            ws.cell(i,12).value = r.get('Formulário 1 CEP')
+            ws.cell(i,13).value = r.get('Formulário 1 Número')
+            ws.cell(i,14).value = r.get('Formulário 1 Complemento de endereço')
+        wb.save(op)
+        with open(op,"rb") as f: content=f.read()
+        return Response(content=content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition":"attachment; filename=VRE_Ingressantes.xlsx"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _shutil.rmtree(tmp, ignore_errors=True)
+
+@app.post("/gerar-vre-retirantes")
+async def gerar_vre_retirantes(minuta: UploadFile = File(...)):
+    tmp = _tempfile.mkdtemp()
+    try:
+        op = _os.path.join(tmp,"VRE_Retirantes.xlsx")
+        mb = await minuta.read()
+        rets = extrair_dados_retirantes_docx(mb)
+        from openpyxl import Workbook as _WBB; _wbb=_WBB(); _wbb.active.title='Retirantes'; _wbb.save(op)
+        wb = _load_workbook(op)
+        ws = wb['Retirantes']
+        ws.cell(1,1).value='CPF'; ws.cell(1,2).value='Nome'
+        for i,ret in enumerate(rets,start=2):
+            ws.cell(i,1).value=_re.sub('[.-]','',ret.get('cpf','')).zfill(11)
+            ws.cell(i,2).value=ret['nome']
+        wb.save(op)
+        with open(op,"rb") as f: content=f.read()
+        return Response(content=content, media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            headers={"Content-Disposition":"attachment; filename=VRE_Retirantes.xlsx"})
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
+    finally:
+        _shutil.rmtree(tmp, ignore_errors=True)
